@@ -3,7 +3,7 @@ const cors       = require("cors");
 const path       = require("path");
 const multer     = require("multer");
 const cloudinary = require("cloudinary").v2;
-const { CloudinaryStorage } = require("multer-storage-cloudinary");
+const { Readable } = require("stream");
 require("dotenv").config();
 
 const { createClient } = require("@libsql/client");
@@ -21,24 +21,32 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: async (req, file) => ({
-    folder:    "estamotes-elite",
-    format:    "jpg",
-    transformation: [{ width: 1200, quality: "auto:good", fetch_format: "auto" }],
-    public_id: `${Date.now()}-${file.fieldname}`,
-  }),
-});
-
+/* ── Multer — store in memory, then stream to Cloudinary ─────── */
 const upload = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB max
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
   fileFilter: (_, file, cb) => {
-    const allowed = ["image/jpeg", "image/png", "image/jpg", "image/webp", "image/heic"];
-    allowed.includes(file.mimetype) ? cb(null, true) : cb(new Error("Only image files are allowed."));
+    const allowed = ["image/jpeg","image/png","image/jpg","image/webp","image/heic","image/heif"];
+    allowed.includes(file.mimetype)
+      ? cb(null, true)
+      : cb(new Error("Only image files are allowed."));
   },
 });
+
+/* ── Upload buffer to Cloudinary ────────────────────────────── */
+function uploadToCloudinary(buffer, folder, publicId) {
+  return new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      {
+        folder,
+        public_id: publicId,
+        transformation: [{ width: 1400, quality: "auto:good", fetch_format: "auto" }],
+      },
+      (err, result) => err ? reject(err) : resolve(result.secure_url)
+    );
+    Readable.from(buffer).pipe(stream);
+  });
+}
 
 /* ── Init DB ────────────────────────────────────────────────── */
 async function initDB() {
@@ -66,14 +74,13 @@ async function initDB() {
   console.log("✓ DB ready");
 }
 
-/* ── Express ────────────────────────────────────────────────── */
+/* ── App ────────────────────────────────────────────────────── */
 const app  = express();
 const PORT = process.env.PORT || 4000;
 
 app.use(cors());
 app.use(express.json());
 
-/* ── Auth middleware ────────────────────────────────────────── */
 function adminOnly(req, res, next) {
   if (req.headers["x-admin-token"] !== process.env.ADMIN_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
@@ -83,7 +90,7 @@ function adminOnly(req, res, next) {
 
 /* ── Routes ─────────────────────────────────────────────────── */
 
-// Check if phone already applied
+// Check phone
 app.get("/api/check/:phone", async (req, res) => {
   try {
     const result = await db.execute({
@@ -97,29 +104,37 @@ app.get("/api/check/:phone", async (req, res) => {
   }
 });
 
-// Upload photos — returns Cloudinary URLs (called before final submit)
+// Upload photos → Cloudinary
 app.post(
   "/api/upload-photos",
   upload.fields([
     { name: "nationalId",  maxCount: 1 },
     { name: "certificate", maxCount: 1 },
   ]),
-  (req, res) => {
+  async (req, res) => {
     try {
-      const nationalId  = req.files?.nationalId?.[0]?.path;
-      const certificate = req.files?.certificate?.[0]?.path;
-      if (!nationalId || !certificate) {
+      const idFile   = req.files?.nationalId?.[0];
+      const certFile = req.files?.certificate?.[0];
+
+      if (!idFile || !certFile) {
         return res.status(400).json({ error: "Both photos are required." });
       }
-      res.json({ nationalIdUrl: nationalId, certificateUrl: certificate });
+
+      const ts = Date.now();
+      const [nationalIdUrl, certificateUrl] = await Promise.all([
+        uploadToCloudinary(idFile.buffer,   "estamotes-elite", `${ts}-national-id`),
+        uploadToCloudinary(certFile.buffer, "estamotes-elite", `${ts}-certificate`),
+      ]);
+
+      res.json({ nationalIdUrl, certificateUrl });
     } catch (err) {
-      console.error(err);
-      res.status(500).json({ error: "Upload failed. Try again." });
+      console.error("Upload error:", err);
+      res.status(500).json({ error: "Photo upload failed. Please try again." });
     }
   }
 );
 
-// Submit full application
+// Submit application
 app.post("/api/apply", async (req, res) => {
   const {
     phone, fullName, gender, age, grade, school, city,
@@ -144,9 +159,9 @@ app.post("/api/apply", async (req, res) => {
                how_heard, national_id_url, certificate_url, applied_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       args: [
-        phone, fullName, gender, age || null, grade, school, city || null,
-        motivation, goalExam, scholarship || null, helpOthers, weakness,
-        howHeard || null, nationalIdUrl, certificateUrl,
+        phone, fullName, gender, age||null, grade, school, city||null,
+        motivation, goalExam, scholarship||null, helpOthers, weakness,
+        howHeard||null, nationalIdUrl, certificateUrl,
         new Date().toISOString(),
       ],
     });
@@ -182,11 +197,11 @@ app.delete("/api/admin/applicants/:id", adminOnly, async (req, res) => {
   }
 });
 
-/* ── Serve React ────────────────────────────────────────────── */
+/* ── Serve React build ──────────────────────────────────────── */
 app.use(express.static(path.join(__dirname, "../build")));
 app.get("*", (_, res) => res.sendFile(path.join(__dirname, "../build/index.html")));
 
 /* ── Start ──────────────────────────────────────────────────── */
 initDB().then(() => {
-  app.listen(PORT, () => console.log(`✓ Server on port ${PORT}`));
+  app.listen(PORT, () => console.log(`✓ Server running on port ${PORT}`));
 }).catch(err => { console.error("DB init failed:", err); process.exit(1); });
