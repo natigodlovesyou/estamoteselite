@@ -5,13 +5,19 @@
   "dependencies": {
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-scripts": "5.0.1"
+    "react-scripts": "5.0.1",
+    "@libsql/client": "^0.14.0",
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5"
   },
   "scripts": {
-    "start": "react-scripts start",
+    "start": "node server/index.js",
     "build": "react-scripts build",
-    "serve": "npx serve -s build -l 3000"
+    "dev:client": "react-scripts start",
+    "dev:server": "node server/index.js"
   },
+  "proxy": "http://localhost:4000",
   "browserslist": {
     "production": [">0.2%", "not dead", "not op_mini all"],
     "development": ["last 1 chrome version", "last 1 firefox version", "last 1 safari version"]
